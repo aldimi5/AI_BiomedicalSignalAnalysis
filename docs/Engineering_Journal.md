@@ -193,3 +193,69 @@ Understanding the data remains the priority over model development.
 ## Lessons Learned
 
 Exploratory Data Analysis is not merely a visualization step; it is a decision-making process that guides the entire machine learning pipeline.
+
+---
+
+## Addendum — Dataset Provenance Verification
+
+While validating a value-range assumption during Phase A of the EDA notebook (`02_exploratory_data_analysis.ipynb`), an unverified claim was found in the documentation: that each heartbeat had been normalized independently ("per-beat min-max normalization"). Rather than continue on that assumption, the provenance and preprocessing pipeline of the derived CSV dataset were traced back to the primary source.
+
+**Verified facts (source paper — Kachuee, Fazeli & Sarrafzadeh, *ECG Heartbeat Classification: A Deep Transferable Representation*, arXiv:1805.00794):**
+
+* The original MIT-BIH recordings were sampled at 360 Hz.
+* The pipeline used to derive this CSV dataset resamples the signal to 125 Hz before segmenting it into individual beats.
+* Amplitude is normalized to [0,1] at the level of each 10-second recording window, *before* individual beats are extracted — not independently per beat.
+* Beats are explicitly zero-padded to a fixed length as an intentional design choice of the pipeline, not an artifact of missing data.
+
+**Empirical findings (this repository's own analysis):** the [0,1] bound holds across all values in both CSV files — consistent with the above, but this only confirms the *global bound*, not that each beat independently spans [0,1].
+
+**Remaining uncertainties:** the exact resampling algorithm (360→125 Hz) and the exact procedure used to construct the specific train/test CSV files distributed for this project are not documented in the source reviewed.
+
+## Lessons Learned (Addendum)
+
+An assumption about the preprocessing pipeline was documented as fact before being traced to a primary source. Provenance should be verified against the original methodology whenever a derived dataset is used, rather than inferred from the data's surface properties alone — surface properties (e.g. a [0,1] range) can be consistent with more than one underlying preprocessing procedure.
+
+---
+
+# Step 5 — Exploratory Data Analysis, Phase B: Effective Signal Length and Zero-Padding
+
+## Objective
+
+Characterize the trailing zero-padding in the fixed-length (187-sample) beat representation, and determine whether the resulting effective segment length is associated with heartbeat class — using the corrected provenance understanding from the addendum above.
+
+## Scientific Question
+
+Is the amount of trailing zero-padding associated with heartbeat class, and if so, does that association reflect a dataset-generation artifact rather than a physiological property of the beat?
+
+## Methodology
+
+`effective_length` was defined as an operational proxy (1 + index of the last non-zero sample per row), computed identically for every beat in both files. Overall and per-class descriptive statistics were computed, followed by a Kruskal-Wallis test (chosen over ANOVA due to skewed, unequal-variance class distributions) with epsilon-squared effect size, and a targeted Mann-Whitney U / rank-biserial comparison for the class flagged by the descriptive statistics (Fusion). No preprocessing, feature engineering, or model training was performed.
+
+## Major Findings
+
+* Trailing padding is substantial and near-universal: median effective length ≈108–109 of 187 samples; only ≈0.9% of beats use the full window. Consistent between train and test.
+* Fusion beats are a clear structural outlier: much shorter (median 78 vs. 106–120 for other classes) and much more tightly distributed (std ≈13–14 vs. ≈10–39 elsewhere), reproducible in both train and test.
+* The global association between class and length is statistically significant but small (Kruskal-Wallis, epsilon-squared ≈0.03 in both splits — class explains ~3% of rank variance). The Fusion-specific association is large (rank-biserial r ≈0.76–0.77; a random Fusion beat is shorter than a random non-Fusion beat ≈88% of the time).
+* Supraventricular beats show a secondary signature: an unusually high rate (~11–12%) of beats using the full 187-sample window with no padding at all, versus under 4% for every other class.
+
+## Interpretation
+
+A small global effect size alongside a large, class-specific effect is not a contradiction — it means four of the five classes overlap substantially in effective length, while Fusion (the rarest class) is the outlier driving nearly all of the association. Per the provenance fact established in the addendum above (pre-padding length = 1.2 × the local median R-R interval of the 10-second window, applied per-window, not per-beat), this is best interpreted as a **local rhythm-context signature correlated with when Fusion beats occur**, not as evidence that Fusion beats have an intrinsically shorter physiological duration.
+
+## Limitations
+
+`effective_length` is a proxy, not a verified physiological boundary (a genuine signal value of exactly 0.0 would be indistinguishable from padding). Statistical association does not establish a causal or physiological mechanism. The exact 360→125 Hz resampling algorithm remains undocumented, so any time-scale conversion (125 Hz → ms) describes the representation, not a validated physiological duration.
+
+## Shortcut-Learning Risk
+
+Because effective length separates Fusion from the rest of the dataset well above chance, any model architecture sensitive to padding (directly, e.g. an explicit length feature, or indirectly, e.g. sequence-length-sensitive layers) has a route to detect Fusion beats without learning ECG morphology. This is a real risk given Fusion is simultaneously the rarest class and the one most reachable by this shortcut — a future model's Fusion recall should not be attributed to morphology learning without first checking a trivial length-based baseline.
+
+## Implications for Future Preprocessing / Modeling
+
+* Any Fusion-class performance claim in later phases must be checked against a length-only baseline before being attributed to learned morphology.
+* Padding must not be silently discarded or masked without deciding, deliberately, whether that changes the length-related signal identified here.
+* This finding does not itself dictate a preprocessing fix (e.g. masking, cropping, or using length as an explicit feature) — that decision is deferred to the preprocessing phase, informed by this evidence.
+
+## Lessons Learned
+
+An apparent data-quality artifact (zero-padding) can carry real, statistically detectable class information without being a physiological signal — and a single omnibus statistic (small global effect size) can hide a large, actionable, class-specific effect. Both the aggregate and the per-class view are necessary before deciding whether something is noise or risk.
